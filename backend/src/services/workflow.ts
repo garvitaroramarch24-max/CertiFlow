@@ -1,5 +1,4 @@
 import { prisma } from "../db.js";
-import { deliveryQueue } from "../queue.js";
 import { randomUUID } from "node:crypto";
 export async function audit(
   batchId: string,
@@ -228,17 +227,15 @@ export async function finalApprove(batchId: string, actorId: string) {
       where: { id: batchId },
       data: { status: "APPROVED" },
     });
-    for (const c of b.candidates) {
-      await tx.certificate.upsert({
-        where: { candidateId: c.id },
-        create: {
-          candidateId: c.id,
-          certificateNo: `CF-${Date.now()}-${randomUUID().slice(0, 8).toUpperCase()}`,
-          verificationToken: randomUUID(),
-        },
-        update: {},
-      });
-    }
+    // One bulk insert instead of one query per candidate.
+    await tx.certificate.createMany({
+      data: b.candidates.map((c) => ({
+        candidateId: c.id,
+        certificateNo: `CF-${Date.now()}-${randomUUID().slice(0, 8).toUpperCase()}`,
+        verificationToken: randomUUID(),
+      })),
+      skipDuplicates: true,
+    });
     await tx.auditEvent.create({
       data: {
         batchId,
@@ -248,12 +245,7 @@ export async function finalApprove(batchId: string, actorId: string) {
       },
     });
     return b.candidates.map((c) => c.id);
-  });
-  for (const candidateId of result)
-    await deliveryQueue.add(
-      "deliver-certificate",
-      { candidateId },
-      { jobId: `certificate-${candidateId}` },
-    );
+  }, { timeout: 60_000, maxWait: 10_000 });
+  // No background delivery jobs: approval + certificate issuance finish in the transaction.
   return result.length;
 }
