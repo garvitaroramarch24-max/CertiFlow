@@ -27,15 +27,34 @@ All API calls except `/health` require `x-demo-user`.
 - `POST /api/batches/:id/cancel/:certificateId` — state office cancellation.
 - `GET /api/verify/:token` — public verification result; no login required.
 
-## Key decisions and correctness
-- Candidate input is validated in full before a batch transaction is written; malformed rows cause a 400 and no partial batch.
-- Batch state transitions are checked server-side. Role checks and district ownership are enforced.
-- District approvals are unique per `(batchId, officerId)`. Two different officers must approve. The database uniqueness constraint protects simultaneous duplicate approvals.
-- Large batches (`>50`) go through `QUALITY_REVIEW`; quality review action is a known next implementation item before full production use.
-- State approval creates certificates in a transaction. `candidateId`, `certificateNo`, and `verificationToken` are unique. A stable BullMQ job ID per candidate prevents duplicate enqueueing.
-- WhatsApp delivery is asynchronous with exponential retries; the worker simulates timeouts. Delivery status persistence and a real provider adapter are next steps.
-- Returning a batch clears district approvals. This is a deliberate policy: corrected candidate data must be re-reviewed.
-- Audit events record actor, action, timestamp and relevant metadata.
+- `POST /api/batches/:id/quality-decision` — quality team `APPROVE`, `RETURN` or `REJECT` for batches above 50 candidates.
+
+## How the system is put together
+```
+React + Vite UI (role switcher, sends x-demo-user)
+        │ REST/JSON
+Express + TypeScript API ── middleware/auth.ts (identity + role check)
+        │                    routes/batches.ts  (validation, ownership checks)
+        │                    services/workflow.ts (state machine, transactions)
+        ├── PostgreSQL via Prisma (batches, candidates, approvals, certificates, audit events)
+        └── Redis + BullMQ queue/worker (asynchronous certificate delivery stand-in)
+```
+- **Routes** validate input with zod and check role and district ownership, then delegate to the **workflow service**, which owns every state transition.
+- **Batch lifecycle:** `DRAFT → (QUALITY_REVIEW if >50 candidates) → DISTRICT_REVIEW → STATE_REVIEW → APPROVED`. `RETURNED` goes back to the centre for correction and resubmission; `REJECTED` is terminal.
+- **Data:** each batch has many candidates and approvals; each candidate has at most one certificate; every action writes an audit event.
+- **Public verification** (`/api/verify/:token`) is the only route without login.
+
+## Key technical decisions, with reasons
+- **Validate the whole batch before writing.** Malformed rows cause a 400 and nothing is saved, so centres never end up with half-uploaded batches.
+- **State machine enforced server-side in one service.** The UI can't skip steps, and the rules live in one place that is easy to test and review.
+- **Row lock per decision (`SELECT … FOR UPDATE`) inside a transaction.** Concurrent approvals on the same batch are processed one at a time, so the approval count and status change can't race.
+- **Unique `(batchId, officerId)` approvals, two required.** The database constraint guarantees one officer can't approve twice, even under simultaneous requests.
+- **Returning a batch clears district approvals.** Corrected data must be re-reviewed, so earlier approvals no longer apply.
+- **Batches above 50 candidates go through quality review first.** This puts extra scrutiny where the risk is largest.
+- **Final approval issues certificates synchronously, in one transaction, with a bulk insert.** The batch becomes `APPROVED` only if every certificate exists, and the request stays fast with no dependency on Redis. Unique `candidateId`, `certificateNo` and `verificationToken` plus `skipDuplicates` make retries safe. The transaction timeout is raised to 60s for large batches.
+- **Delivery is decoupled from approval.** BullMQ with retries and exponential backoff (stable job ID per candidate prevents duplicates) is available for the WhatsApp stand-in. It is not triggered by state approval, so a Redis outage can't block or fail an approval.
+- **Audit event for every transition.** Records actor, action, timestamp and metadata for traceability.
+- **Demo identity via `x-demo-user`.** Fastest way to demo roles; explicitly not production auth.
 
 ## Tests
 ```bash
@@ -44,7 +63,7 @@ cd backend && npm install && npm test
 The included tests cover basic invariants. Add PostgreSQL integration/concurrency tests before production; see DEPLOYMENT.md.
 
 ## Known limitations
-CSV upload UI/parser, PDF rendering/storage, quality-team decision endpoint, real WhatsApp adapter, JWT/OIDC authentication, SSE/WebSocket live updates, and comprehensive integration tests are not fully implemented in this time-boxed MVP. The queue worker currently logs a successful mock delivery rather than sending a real message.
+CSV upload UI/parser, PDF rendering/storage, real WhatsApp adapter, automatic delivery after final approval, delivery status persistence, JWT/OIDC authentication, SSE/WebSocket live updates, and comprehensive integration tests are not fully implemented in this time-boxed MVP. The queue worker currently logs a successful mock delivery rather than sending a real message.
 
 ## AI usage
 AI assistance may be used for scaffolding and review. The team must inspect and understand every submitted line, run the application and tests, and disclose AI usage accurately in the demo.
