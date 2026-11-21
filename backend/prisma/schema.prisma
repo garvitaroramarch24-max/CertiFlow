@@ -1,0 +1,107 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CENTRE
+  DISTRICT_OFFICER
+  QUALITY
+  STATE
+}
+
+enum BatchStatus {
+  DRAFT
+  SUBMITTED
+  QUALITY_REVIEW
+  DISTRICT_REVIEW
+  STATE_REVIEW
+  RETURNED
+  APPROVED
+  REJECTED
+}
+
+enum CertificateStatus {
+  VALID
+  CANCELLED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  role      Role
+  district  String?
+  createdAt DateTime @default(now())
+}
+
+model Batch {
+  id             String       @id @default(cuid())
+  name           String
+  centreId       String
+  status         BatchStatus  @default(DRAFT)
+  district       String
+  candidateCount Int          @default(0)
+  submittedAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  candidates     Candidate[]
+  approvals      Approval[]
+  events         AuditEvent[]
+
+  @@index([status, district, submittedAt])
+}
+
+model Candidate {
+  id          String       @id @default(cuid())
+  batchId     String
+  name        String
+  email       String
+  phone       String
+  course      String
+  externalId  String
+  batch       Batch        @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  certificate Certificate?
+
+  @@unique([batchId, externalId])
+  @@index([email])
+}
+
+model Approval {
+  id        String   @id @default(cuid())
+  batchId   String
+  officerId String
+  decision  String
+  reason    String?
+  createdAt DateTime @default(now())
+  batch     Batch    @relation(fields: [batchId], references: [id])
+
+  @@unique([batchId, officerId])
+}
+
+model Certificate {
+  id                String            @id @default(cuid())
+  candidateId       String            @unique
+  certificateNo     String            @unique
+  verificationToken String            @unique
+  status            CertificateStatus @default(VALID)
+  issuedAt          DateTime          @default(now())
+  cancelledAt       DateTime?
+  candidate         Candidate         @relation(fields: [candidateId], references: [id])
+}
+
+model AuditEvent {
+  id        String   @id @default(cuid())
+  batchId   String?
+  actorId   String?
+  action    String
+  metadata  Json?
+  createdAt DateTime @default(now())
+  batch     Batch?   @relation(fields: [batchId], references: [id])
+
+  @@index([batchId, createdAt])
+}

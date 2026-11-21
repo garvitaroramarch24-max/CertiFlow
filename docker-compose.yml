@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: certiflow
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U certiflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://certiflow:certiflow@postgres:5432/certiflow?schema=public
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PORT: 4000
+      JWT_SECRET: local-demo-secret-change-me
+    ports: ["4000:4000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    command: sh -c "npx prisma migrate deploy && npm run seed && npm run dev"
+  web:
+    build: ./frontend
+    ports: ["5173:5173"]
+    depends_on: [api]
+volumes:
+  pgdata:
